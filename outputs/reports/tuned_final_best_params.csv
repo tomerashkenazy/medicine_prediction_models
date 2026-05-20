@@ -1,0 +1,4 @@
+model,best_roc_auc,model__C,model__class_weight,model__l1_ratio
+tuned_logistic_elastic_net,0.8022281130818149,0.1,balanced,0.9
+tuned_logistic_lasso,0.8022093219358558,0.1,balanced,
+tuned_logistic_ridge,0.8022050544466585,1.0,balanced,

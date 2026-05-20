@@ -1,0 +1,10 @@
+measure,value
+total_raw_columns,186
+included_model_feature_count,181
+numeric_feature_count,173
+object_categorical_feature_count,8
+excluded_hospital_death,hospital_death
+excluded_encounter_id,encounter_id
+excluded_patient_id,patient_id
+excluded_apache_4a_hospital_death_prob,apache_4a_hospital_death_prob
+excluded_apache_4a_icu_death_prob,apache_4a_icu_death_prob

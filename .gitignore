@@ -3,12 +3,12 @@ __pycache__/
 .ipynb_checkpoints/
 .env
 
-# Local data and generated artifacts
-data/
-outputs/
+# # Local data and generated artifacts
+# data/
+# outputs/
 
-# Saved Python artifacts
-*.joblib
+# # Saved Python artifacts
+# *.joblib
 
 # Microsoft Office temporary lock files
 ~$*
