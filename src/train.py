@@ -15,7 +15,13 @@ from sklearn.utils.class_weight import compute_sample_weight
 from src.cohort import apply_stage1_cohort
 from src.data_loading import load_solution_template, load_training_data, load_unlabeled_data
 from src.evaluation import DEFAULT_THRESHOLDS, probability_metrics, summarize_thresholds
-from src.features import APACHE_BENCHMARK_COLUMN, ID_COLUMN, TARGET_COLUMN, get_raw_feature_columns
+from src.features import (
+    APACHE_BENCHMARK_COLUMN,
+    FEATURE_REDUCTION_SETS,
+    ID_COLUMN,
+    TARGET_COLUMN,
+    get_raw_feature_columns,
+)
 from src.models import build_pipeline, load_model_config
 from src.reporting import (
     ensure_output_dirs,
@@ -48,11 +54,28 @@ def _fit_params(fit_config: dict | None, y: pd.Series) -> dict:
     raise ValueError(f"Unsupported fit configuration: {fit_config}")
 
 
+def _unique_preserving_order(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def _config_excluded_features(configs: list[dict]) -> list[str]:
+    excluded = []
+    for config in configs:
+        reduction_name = config.get("feature_reduction")
+        if reduction_name:
+            if reduction_name not in FEATURE_REDUCTION_SETS:
+                raise ValueError(f"Unsupported feature_reduction: {reduction_name}")
+            excluded.extend(FEATURE_REDUCTION_SETS[reduction_name])
+        excluded.extend(config.get("exclude_features", []))
+    return _unique_preserving_order(excluded)
+
+
 def _model_feature_accounting(
     *,
     model_name: str,
     final_pipeline,
-    raw_feature_count: int,
+    raw_feature_count_before_exclusion: int,
+    raw_feature_count_after_exclusion: int,
     excluded_feature_columns: list[str],
 ) -> dict:
     preprocessor = final_pipeline.named_steps["preprocessor"]
@@ -66,12 +89,33 @@ def _model_feature_accounting(
     )
     return {
         "model": model_name,
-        "raw_feature_count": raw_feature_count,
+        "raw_feature_count_before_exclusion": raw_feature_count_before_exclusion,
         "excluded_feature_count": len(excluded_feature_columns),
         "excluded_features": "; ".join(excluded_feature_columns),
+        "raw_feature_count_after_exclusion": raw_feature_count_after_exclusion,
         "transformed_feature_count": transformed_feature_count,
         "nonzero_coefficient_count": nonzero_coefficients,
     }
+
+
+def _coefficient_report(model_name: str, final_pipeline) -> pd.DataFrame:
+    preprocessor = final_pipeline.named_steps["preprocessor"]
+    estimator = final_pipeline.named_steps["model"]
+    coefficients = getattr(estimator, "coef_", None)
+    if coefficients is None:
+        return pd.DataFrame()
+
+    report = pd.DataFrame(
+        {
+            "model": model_name,
+            "transformed_feature": preprocessor.get_feature_names_out(),
+            "coefficient": coefficients.ravel(),
+        }
+    )
+    report["abs_coefficient"] = report["coefficient"].abs()
+    report["is_zero"] = report["abs_coefficient"] <= 1e-12
+    report["is_near_zero"] = report["abs_coefficient"] <= 1e-6
+    return report.sort_values("abs_coefficient", ascending=False)
 
 
 def _grid_search(
@@ -234,8 +278,28 @@ def train_from_configs(
     output_dirs = ensure_output_dirs(output_dir)
     train_df = apply_stage1_cohort(load_training_data())
     unlabeled_df = load_unlabeled_data()
-    excluded_feature_columns = excluded_feature_columns or []
+    config_entries = [
+        (config_path, load_model_config(config_path))
+        for config_path in sorted(config_dir.glob("*.yaml"))
+    ]
+    if include_models:
+        config_entries = [
+            (config_path, config)
+            for config_path, config in config_entries
+            if config["name"] in include_models
+        ]
+    if not config_entries:
+        raise ValueError("No configs were selected for training.")
 
+    excluded_feature_columns = _unique_preserving_order(
+        (excluded_feature_columns or [])
+        + _config_excluded_features([config for _, config in config_entries])
+    )
+    if excluded_feature_columns:
+        _validate_columns(train_df, excluded_feature_columns)
+        _validate_columns(unlabeled_df, excluded_feature_columns)
+
+    raw_feature_columns_before_exclusion = get_raw_feature_columns(train_df.columns)
     feature_columns = get_raw_feature_columns(
         train_df.columns,
         additional_excluded_columns=excluded_feature_columns,
@@ -247,19 +311,36 @@ def train_from_configs(
     y = train_df[TARGET_COLUMN].astype(int)
 
     save_csv(apache_benchmark(train_df), output_dirs["reports"] / "apache_benchmark_metrics.csv")
+    save_csv(
+        pd.DataFrame({"feature_name": feature_columns}),
+        output_dirs["reports"] / "model_input_features.csv",
+    )
+    save_csv(
+        pd.DataFrame(
+            {
+                "feature_name": raw_feature_columns_before_exclusion,
+                "included": [
+                    feature not in excluded_feature_columns
+                    for feature in raw_feature_columns_before_exclusion
+                ],
+                "exclusion_status": [
+                    "excluded" if feature in excluded_feature_columns else "included"
+                    for feature in raw_feature_columns_before_exclusion
+                ],
+            }
+        ),
+        output_dirs["reports"] / "raw_feature_accounting.csv",
+    )
 
     all_fold_metrics = []
     all_threshold_metrics = []
     all_best_params_by_fold = []
     final_best_params = []
     feature_accounting_rows = []
+    coefficient_reports = []
 
-    for config_path in sorted(config_dir.glob("*.yaml")):
-        config = load_model_config(config_path)
+    for _, config in config_entries:
         model_name = config["name"]
-        if include_models and model_name not in include_models:
-            print(f"Skipping {model_name} because it is not in --include-model.", flush=True)
-            continue
         print(f"Training {model_name}...", flush=True)
         pipeline = build_pipeline(config, X)
 
@@ -331,10 +412,18 @@ def train_from_configs(
             _model_feature_accounting(
                 model_name=model_name,
                 final_pipeline=final_pipeline,
-                raw_feature_count=len(feature_columns),
+                raw_feature_count_before_exclusion=len(raw_feature_columns_before_exclusion),
+                raw_feature_count_after_exclusion=len(feature_columns),
                 excluded_feature_columns=excluded_feature_columns,
             )
         )
+        coefficient_report = _coefficient_report(model_name, final_pipeline)
+        if not coefficient_report.empty:
+            coefficient_reports.append(coefficient_report)
+            save_csv(
+                coefficient_report,
+                output_dirs["reports"] / f"{model_name}_coefficients.csv",
+            )
 
         unlabeled_predictions = load_solution_template()
         probabilities = _predict_mortality_probability(final_pipeline, unlabeled_df[feature_columns])
@@ -390,6 +479,11 @@ def train_from_configs(
             pd.DataFrame(final_best_params),
             output_dirs["reports"] / "final_best_params.csv",
         )
+    if coefficient_reports:
+        save_csv(
+            pd.concat(coefficient_reports, ignore_index=True),
+            output_dirs["reports"] / "coefficients.csv",
+        )
 
 
 def tune_from_configs(
@@ -406,7 +500,31 @@ def tune_from_configs(
     output_dirs = ensure_output_dirs(output_dir)
     train_df = apply_stage1_cohort(load_training_data())
     unlabeled_df = load_unlabeled_data()
-    excluded_feature_columns = excluded_feature_columns or []
+    config_entries = [
+        (config_path, load_model_config(config_path))
+        for config_path in sorted(config_dir.glob("*.yaml"))
+    ]
+    if include_models:
+        config_entries = [
+            (config_path, config)
+            for config_path, config in config_entries
+            if config["name"] in include_models
+        ]
+    config_entries = [
+        (config_path, config)
+        for config_path, config in config_entries
+        if "search_grid" in config
+    ]
+    if not config_entries:
+        raise ValueError("No configs with search_grid were found.")
+
+    excluded_feature_columns = _unique_preserving_order(
+        (excluded_feature_columns or [])
+        + _config_excluded_features([config for _, config in config_entries])
+    )
+    if excluded_feature_columns:
+        _validate_columns(train_df, excluded_feature_columns)
+        _validate_columns(unlabeled_df, excluded_feature_columns)
 
     feature_columns = get_raw_feature_columns(
         train_df.columns,
@@ -423,15 +541,7 @@ def tune_from_configs(
     all_best_params_by_fold = []
     final_best_params = []
 
-    for config_path in sorted(config_dir.glob("*.yaml")):
-        config = load_model_config(config_path)
-        if include_models and config["name"] not in include_models:
-            print(f"Skipping {config['name']} because it is not in --include-model.", flush=True)
-            continue
-        if "search_grid" not in config:
-            print(f"Skipping {config['name']} because it has no search_grid.", flush=True)
-            continue
-
+    for _, config in config_entries:
         model_name = config["name"]
         tuned_name = f"tuned_{model_name}"
         print(f"Tuning {model_name}...", flush=True)

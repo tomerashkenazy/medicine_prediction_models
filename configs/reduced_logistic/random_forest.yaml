@@ -1,0 +1,17 @@
+name: reduced_random_forest
+description: Reduced random forest without high-cardinality site or diagnosis code features.
+feature_reduction: reduced_logistic_no_codes
+exclude_features:
+  - hospital_id
+  - icu_id
+  - apache_2_diagnosis
+  - apache_3j_diagnosis
+model:
+  type: random_forest_classifier
+  n_estimators: 200
+  max_depth: null
+  min_samples_leaf: 10
+  max_features: sqrt
+  class_weight: balanced
+  n_jobs: -1
+  random_state: 42

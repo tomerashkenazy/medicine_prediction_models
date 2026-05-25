@@ -1,8 +1,0 @@
-measure,value
-raw_training_rows,91713
-known_pediatric_rows_age_lt_18_excluded,170
-missing_age_rows_retained,4228
-unique_patient_id_count,91713
-final_modeling_rows,91543
-under_4_hour_icu_los_filter_applied,no
-under_4_hour_icu_los_filter_reason,No direct ICU length-of-stay column; pre_icu_los_days is pre-ICU time.

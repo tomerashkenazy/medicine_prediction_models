@@ -1,5 +1,11 @@
 name: reduced_logistic_baseline
 description: Reduced multivariable logistic regression without high-cardinality site or diagnosis code features.
+feature_reduction: reduced_logistic_no_codes
+exclude_features:
+  - hospital_id
+  - icu_id
+  - apache_2_diagnosis
+  - apache_3j_diagnosis
 model:
   type: logistic_regression
   penalty: l2

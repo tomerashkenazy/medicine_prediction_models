@@ -1,0 +1,18 @@
+name: reduced_gradient_boosted_trees
+description: Reduced gradient boosted decision trees without high-cardinality site or diagnosis code features.
+feature_reduction: reduced_logistic_no_codes
+exclude_features:
+  - hospital_id
+  - icu_id
+  - apache_2_diagnosis
+  - apache_3j_diagnosis
+model:
+  type: hist_gradient_boosting_classifier
+  max_iter: 150
+  learning_rate: 0.05
+  max_depth: 3
+  min_samples_leaf: 20
+  l2_regularization: 0.0
+  random_state: 42
+fit:
+  sample_weight: balanced

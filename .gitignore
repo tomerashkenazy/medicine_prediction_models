@@ -3,12 +3,28 @@ __pycache__/
 .ipynb_checkpoints/
 .env
 
-# # Local data and generated artifacts
+# Local data
 data/
-# outputs/
+*.csv.gz
+*.parquet
 
-# # Saved Python artifacts
-# *.joblib
+# Saved Python artifacts
+*.joblib
+*.pkl
+*.pickle
+
+# Generated outputs.
+# Keep curated portfolio outputs in docs/ instead.
+outputs/
+outputs/models/
+outputs/predictions/
+outputs/reports/*_oof_predictions.csv
+outputs/reduced_logistic_no_codes/models/
+outputs/reduced_logistic_no_codes/predictions/
+outputs/reduced_logistic_no_codes/reports/*_oof_predictions.csv
+
+# Course/reference materials not needed for the public portfolio.
+project presentations/
 
 # Microsoft Office temporary lock files
 ~$*

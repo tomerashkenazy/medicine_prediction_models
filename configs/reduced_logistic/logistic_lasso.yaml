@@ -1,6 +1,12 @@
 name: reduced_logistic_lasso
 description: Reduced lasso logistic regression without high-cardinality site or diagnosis code features.
 tune: true
+feature_reduction: reduced_logistic_no_codes
+exclude_features:
+  - hospital_id
+  - icu_id
+  - apache_2_diagnosis
+  - apache_3j_diagnosis
 model:
   type: logistic_regression
   penalty: l1
@@ -12,5 +18,5 @@ model:
   n_jobs: -1
   random_state: 42
 search_grid:
-  model__C: [0.01, 0.1, 1.0]
-  model__class_weight: [balanced]
+  model__C: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+  model__class_weight: [null, balanced]

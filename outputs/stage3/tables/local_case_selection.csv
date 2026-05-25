@@ -1,5 +1,0 @@
-model,row_index,observed_hospital_death,predicted_mortality_probability,case_type
-logistic_elastic_net,52971,1,0.9999921300859992,true_positive
-logistic_elastic_net,36133,0,0.0007872208879615,true_negative
-logistic_elastic_net,29719,0,0.999941277979999,false_positive
-logistic_elastic_net,88185,1,0.0072715133062566,false_negative

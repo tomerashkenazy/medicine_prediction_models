@@ -1,0 +1,6 @@
+model,raw_feature_count_before_exclusion,excluded_feature_count,excluded_features,raw_feature_count_after_exclusion,transformed_feature_count,nonzero_coefficient_count
+reduced_logistic_baseline,181,4,hospital_id; icu_id; apache_2_diagnosis; apache_3j_diagnosis,177,400,399.0
+reduced_logistic_elastic_net,181,4,hospital_id; icu_id; apache_2_diagnosis; apache_3j_diagnosis,177,400,335.0
+reduced_logistic_lasso,181,4,hospital_id; icu_id; apache_2_diagnosis; apache_3j_diagnosis,177,400,374.0
+reduced_gradient_boosted_trees,181,4,hospital_id; icu_id; apache_2_diagnosis; apache_3j_diagnosis,177,400,
+reduced_random_forest,181,4,hospital_id; icu_id; apache_2_diagnosis; apache_3j_diagnosis,177,400,

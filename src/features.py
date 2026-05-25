@@ -48,6 +48,12 @@ CATEGORICAL_CODE_FEATURES = [
     "apache_3j_diagnosis",
 ]
 
+REDUCED_LOGISTIC_EXCLUDED_FEATURES = CATEGORICAL_CODE_FEATURES.copy()
+
+FEATURE_REDUCTION_SETS = {
+    "reduced_logistic_no_codes": REDUCED_LOGISTIC_EXCLUDED_FEATURES,
+}
+
 
 def get_raw_feature_columns(
     columns,
