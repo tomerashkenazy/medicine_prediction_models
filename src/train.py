@@ -48,6 +48,55 @@ def _fit_params(fit_config: dict | None, y: pd.Series) -> dict:
     raise ValueError(f"Unsupported fit configuration: {fit_config}")
 
 
+def _model_feature_accounting(
+    *,
+    model_name: str,
+    final_pipeline,
+    raw_feature_count: int,
+    excluded_feature_columns: list[str],
+) -> dict:
+    preprocessor = final_pipeline.named_steps["preprocessor"]
+    estimator = final_pipeline.named_steps["model"]
+    transformed_feature_count = len(preprocessor.get_feature_names_out())
+    coefficients = getattr(estimator, "coef_", None)
+    nonzero_coefficients = (
+        int(np.count_nonzero(np.abs(coefficients.ravel()) > 1e-12))
+        if coefficients is not None
+        else np.nan
+    )
+    return {
+        "model": model_name,
+        "raw_feature_count": raw_feature_count,
+        "excluded_feature_count": len(excluded_feature_columns),
+        "excluded_features": "; ".join(excluded_feature_columns),
+        "transformed_feature_count": transformed_feature_count,
+        "nonzero_coefficient_count": nonzero_coefficients,
+    }
+
+
+def _grid_search(
+    model,
+    search_grid: dict,
+    *,
+    inner_splits: int,
+    random_state: int,
+    search_n_jobs: int,
+) -> GridSearchCV:
+    return GridSearchCV(
+        estimator=model,
+        param_grid=search_grid,
+        scoring="roc_auc",
+        cv=StratifiedKFold(
+            n_splits=inner_splits,
+            shuffle=True,
+            random_state=random_state,
+        ),
+        n_jobs=search_n_jobs,
+        refit=True,
+        return_train_score=False,
+    )
+
+
 def cross_validate_model(
     model,
     X: pd.DataFrame,
@@ -176,13 +225,21 @@ def train_from_configs(
     config_dir: Path = DEFAULT_CONFIG_DIR,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     n_splits: int = 5,
+    inner_splits: int = 3,
     random_state: int = 42,
+    search_n_jobs: int = -1,
+    excluded_feature_columns: list[str] | None = None,
+    include_models: list[str] | None = None,
 ) -> None:
     output_dirs = ensure_output_dirs(output_dir)
     train_df = apply_stage1_cohort(load_training_data())
     unlabeled_df = load_unlabeled_data()
+    excluded_feature_columns = excluded_feature_columns or []
 
-    feature_columns = get_raw_feature_columns(train_df.columns)
+    feature_columns = get_raw_feature_columns(
+        train_df.columns,
+        additional_excluded_columns=excluded_feature_columns,
+    )
     _validate_columns(train_df, feature_columns + [TARGET_COLUMN, ID_COLUMN])
     _validate_columns(unlabeled_df, feature_columns + [ID_COLUMN])
 
@@ -193,21 +250,62 @@ def train_from_configs(
 
     all_fold_metrics = []
     all_threshold_metrics = []
+    all_best_params_by_fold = []
+    final_best_params = []
+    feature_accounting_rows = []
 
     for config_path in sorted(config_dir.glob("*.yaml")):
         config = load_model_config(config_path)
         model_name = config["name"]
+        if include_models and model_name not in include_models:
+            print(f"Skipping {model_name} because it is not in --include-model.", flush=True)
+            continue
         print(f"Training {model_name}...", flush=True)
         pipeline = build_pipeline(config, X)
 
-        fold_metrics, threshold_metrics_df, oof_predictions = cross_validate_model(
-            pipeline,
-            X,
-            y,
-            n_splits=n_splits,
-            random_state=random_state,
-            fit_config=config.get("fit"),
-        )
+        if config.get("tune", False):
+            if "search_grid" not in config:
+                raise ValueError(f"{model_name} has tune=true but no search_grid.")
+            fold_metrics, threshold_metrics_df, oof_predictions, best_params_by_fold = (
+                nested_grid_search_model(
+                    pipeline,
+                    config["search_grid"],
+                    X,
+                    y,
+                    n_splits=n_splits,
+                    inner_splits=inner_splits,
+                    random_state=random_state,
+                    search_n_jobs=search_n_jobs,
+                    fit_config=config.get("fit"),
+                )
+            )
+            best_params_by_fold.insert(0, "model", model_name)
+            all_best_params_by_fold.append(best_params_by_fold)
+
+            final_search = _grid_search(
+                build_pipeline(config, X),
+                config["search_grid"],
+                inner_splits=inner_splits,
+                random_state=random_state,
+                search_n_jobs=search_n_jobs,
+            )
+            final_search.fit(X, y, **_fit_params(config.get("fit"), y))
+            final_pipeline = final_search.best_estimator_
+            final_params = {"model": model_name, "best_roc_auc": final_search.best_score_}
+            final_params.update(final_search.best_params_)
+            final_best_params.append(final_params)
+        else:
+            fold_metrics, threshold_metrics_df, oof_predictions = cross_validate_model(
+                pipeline,
+                X,
+                y,
+                n_splits=n_splits,
+                random_state=random_state,
+                fit_config=config.get("fit"),
+            )
+            final_pipeline = build_pipeline(config, X)
+            final_pipeline.fit(X, y, **_fit_params(config.get("fit"), y))
+
         fold_metrics.insert(0, "model", model_name)
         threshold_metrics_df.insert(0, "model", model_name)
         oof_predictions.insert(0, "model", model_name)
@@ -228,9 +326,15 @@ def train_from_configs(
             f"{model_name} precision-recall curve",
         )
 
-        final_pipeline = build_pipeline(config, X)
-        final_pipeline.fit(X, y, **_fit_params(config.get("fit"), y))
         joblib.dump(final_pipeline, output_dirs["models"] / f"{model_name}.joblib")
+        feature_accounting_rows.append(
+            _model_feature_accounting(
+                model_name=model_name,
+                final_pipeline=final_pipeline,
+                raw_feature_count=len(feature_columns),
+                excluded_feature_columns=excluded_feature_columns,
+            )
+        )
 
         unlabeled_predictions = load_solution_template()
         probabilities = _predict_mortality_probability(final_pipeline, unlabeled_df[feature_columns])
@@ -251,6 +355,9 @@ def train_from_configs(
         )
         print(f"Finished {model_name}.", flush=True)
 
+    if not all_fold_metrics:
+        raise ValueError("No configs were trained.")
+
     fold_metrics_df = pd.concat(all_fold_metrics, ignore_index=True)
     threshold_metrics_df = pd.concat(all_threshold_metrics, ignore_index=True)
     summary = (
@@ -269,6 +376,20 @@ def train_from_configs(
     save_csv(fold_metrics_df, output_dirs["reports"] / "cv_fold_metrics.csv")
     save_csv(summary, output_dirs["reports"] / "cv_summary_metrics.csv")
     save_csv(threshold_metrics_df, output_dirs["reports"] / "cv_threshold_metrics.csv")
+    save_csv(
+        pd.DataFrame(feature_accounting_rows),
+        output_dirs["reports"] / "feature_accounting.csv",
+    )
+    if all_best_params_by_fold:
+        save_csv(
+            pd.concat(all_best_params_by_fold, ignore_index=True),
+            output_dirs["reports"] / "best_params_by_fold.csv",
+        )
+    if final_best_params:
+        save_csv(
+            pd.DataFrame(final_best_params),
+            output_dirs["reports"] / "final_best_params.csv",
+        )
 
 
 def tune_from_configs(
@@ -279,12 +400,18 @@ def tune_from_configs(
     inner_splits: int = 3,
     random_state: int = 42,
     search_n_jobs: int = -1,
+    excluded_feature_columns: list[str] | None = None,
+    include_models: list[str] | None = None,
 ) -> None:
     output_dirs = ensure_output_dirs(output_dir)
     train_df = apply_stage1_cohort(load_training_data())
     unlabeled_df = load_unlabeled_data()
+    excluded_feature_columns = excluded_feature_columns or []
 
-    feature_columns = get_raw_feature_columns(train_df.columns)
+    feature_columns = get_raw_feature_columns(
+        train_df.columns,
+        additional_excluded_columns=excluded_feature_columns,
+    )
     _validate_columns(train_df, feature_columns + [TARGET_COLUMN, ID_COLUMN])
     _validate_columns(unlabeled_df, feature_columns + [ID_COLUMN])
 
@@ -298,6 +425,9 @@ def tune_from_configs(
 
     for config_path in sorted(config_dir.glob("*.yaml")):
         config = load_model_config(config_path)
+        if include_models and config["name"] not in include_models:
+            print(f"Skipping {config['name']} because it is not in --include-model.", flush=True)
+            continue
         if "search_grid" not in config:
             print(f"Skipping {config['name']} because it has no search_grid.", flush=True)
             continue
@@ -342,18 +472,12 @@ def tune_from_configs(
             f"{tuned_name} precision-recall curve",
         )
 
-        final_search = GridSearchCV(
-            estimator=build_pipeline(config, X),
-            param_grid=config["search_grid"],
-            scoring="roc_auc",
-            cv=StratifiedKFold(
-                n_splits=inner_splits,
-                shuffle=True,
-                random_state=random_state,
-            ),
-            n_jobs=search_n_jobs,
-            refit=True,
-            return_train_score=False,
+        final_search = _grid_search(
+            build_pipeline(config, X),
+            config["search_grid"],
+            inner_splits=inner_splits,
+            random_state=random_state,
+            search_n_jobs=search_n_jobs,
         )
         final_search.fit(X, y, **_fit_params(config.get("fit"), y))
         joblib.dump(final_search.best_estimator_, output_dirs["models"] / f"{tuned_name}.joblib")
@@ -427,6 +551,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--search-n-jobs", type=int, default=-1)
+    parser.add_argument(
+        "--exclude-feature",
+        action="append",
+        default=[],
+        help="Raw feature column to exclude from model inputs. Can be repeated.",
+    )
+    parser.add_argument(
+        "--include-model",
+        action="append",
+        default=[],
+        help="Config model name to train. Can be repeated. Defaults to all configs.",
+    )
     return parser.parse_args()
 
 
@@ -440,11 +576,17 @@ if __name__ == "__main__":
             inner_splits=args.inner_splits,
             random_state=args.random_state,
             search_n_jobs=args.search_n_jobs,
+            excluded_feature_columns=args.exclude_feature,
+            include_models=args.include_model,
         )
     else:
         train_from_configs(
             config_dir=args.config_dir,
             output_dir=args.output_dir,
             n_splits=args.n_splits,
+            inner_splits=args.inner_splits,
             random_state=args.random_state,
+            search_n_jobs=args.search_n_jobs,
+            excluded_feature_columns=args.exclude_feature,
+            include_models=args.include_model,
         )

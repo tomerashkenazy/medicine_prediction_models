@@ -49,7 +49,12 @@ CATEGORICAL_CODE_FEATURES = [
 ]
 
 
-def get_raw_feature_columns(columns) -> list[str]:
+def get_raw_feature_columns(
+    columns,
+    additional_excluded_columns: list[str] | None = None,
+) -> list[str]:
     """Return all raw model inputs, excluding labels, row IDs, and model outputs."""
     excluded = set(EXCLUDED_MODEL_COLUMNS)
+    if additional_excluded_columns:
+        excluded.update(additional_excluded_columns)
     return [column for column in columns if column not in excluded]

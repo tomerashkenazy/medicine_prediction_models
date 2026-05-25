@@ -1,0 +1,11 @@
+name: reduced_logistic_baseline
+description: Reduced multivariable logistic regression without high-cardinality site or diagnosis code features.
+model:
+  type: logistic_regression
+  penalty: l2
+  solver: lbfgs
+  C: 1000000.0
+  class_weight: balanced
+  max_iter: 1000
+  tol: 0.0001
+  random_state: 42

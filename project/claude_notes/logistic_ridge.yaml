@@ -1,0 +1,13 @@
+name: logistic_ridge
+description: Ridge logistic regression with L2 regularization.
+model:
+  type: logistic_regression
+  penalty: l2
+  solver: lbfgs
+  C: 1.0
+  class_weight: balanced
+  max_iter: 1000
+  tol: 0.0001
+  random_state: 42
+search_grid:
+  model__C: [0.1, 0.3, 1.0, 3.0, 10.0]
