@@ -37,7 +37,9 @@ def _ensure_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 def extract_subgroups(df: pd.DataFrame) -> tuple[list[list[int]], list[str]]:
-    """Generate list of indices for marginal and intersectional subgroups."""
+    """Generate list of indices for marginal and intersectional subgroups.
+    This will be used for  the algorithm HKRR 
+    """
     subgroups = []
     labels = []
     
@@ -52,6 +54,7 @@ def extract_subgroups(df: pd.DataFrame) -> tuple[list[list[int]], list[str]]:
     
     # Pairwise Intersections
     attr_subset = ["age_group", "gender_clean", "ethnicity_clean"]
+    # ugly but straight forward 4 nested loops :) 
     for i, attr1 in enumerate(attr_subset):
         for attr2 in attr_subset[i+1:]:
             for val1 in df[attr1].dropna().unique():

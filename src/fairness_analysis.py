@@ -2,7 +2,7 @@
 
 Steps:
   1. Load training data (with protected attributes) and the saved model.
-  2. Create a hold-out test set using the same cohort filtering + stratified split.
+  2. create the test split same as when the model was trained
   3. Generate mortality probability predictions on the test set.
   4. Evaluate fairness: FNR/FPR by subgroup, calibration, intersectional analysis.
   5. Save all figures and a narrative summary.
@@ -42,12 +42,9 @@ REPORTS_DIR = OUTPUT_DIR / "reports"
 PROTECTED_ATTRS = ["age", "gender", "ethnicity", "hospital_id"]
 REDUCED_EXCLUDED = ["hospital_id", "icu_id", "apache_2_diagnosis", "apache_3j_diagnosis"]
 
-THRESHOLD = 0.3  # default decision threshold
+THRESHOLD = 0.3  # recommended decision threshold
+THRESHOLD = 0.5  # default decision threshold
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _ensure_dirs():
     for d in [OUTPUT_DIR, FIGURES_DIR, REPORTS_DIR]:
@@ -104,17 +101,14 @@ def _calibration_stats(y_true, y_prob, n_bins=10):
         return {"ECE": np.nan, "n_bins_used": 0}
 
 
-# ---------------------------------------------------------------------------
-# Step 1 & 3: Data + Model Loading + Predictions
-# ---------------------------------------------------------------------------
 
 def prepare_data_and_predictions():
-    print("Step 1: Loading data and model...")
+    print("Loading data and model...")
     df = _load_data()
     model = joblib.load(MODEL_PATH)
     feature_cols = _get_model_features(df)
 
-    # Stratified split: use fold-1 of a 5-fold split as the test set (~20%)
+    # create the test split same as when the model was trained
     # same as in train_models.py
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     train_idx, test_idx = next(skf.split(df, df[TARGET_COLUMN].astype(int)))
@@ -139,13 +133,8 @@ def prepare_data_and_predictions():
     print(f"  Model features: {len(feature_cols)}")
     return test_df
 
-
-# ---------------------------------------------------------------------------
-# Step 2.1: Subgroup Error Rates (FNR / FPR)
-# ---------------------------------------------------------------------------
-
 def compute_subgroup_error_rates(test_df: pd.DataFrame) -> pd.DataFrame:
-    print("\nStep 2.1: Computing subgroup error rates...")
+    print("\nComputing subgroup error rates...")
     rows = []
     attr_col_map = {
         "Age": "age_group",
@@ -177,12 +166,8 @@ def compute_subgroup_error_rates(test_df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Step 2.2: Calibration by Subgroup
-# ---------------------------------------------------------------------------
-
 def compute_subgroup_calibration(test_df: pd.DataFrame) -> pd.DataFrame:
-    print("\nStep 2.2: Computing subgroup calibration...")
+    print("\nComputing subgroup calibration...")
     rows = []
     attr_col_map = {
         "Age": "age_group",
@@ -205,12 +190,14 @@ def compute_subgroup_calibration(test_df: pd.DataFrame) -> pd.DataFrame:
                                 "mean_predicted", "calibration_gap", "ECE"]]
 
 
-# ---------------------------------------------------------------------------
-# Step 2.3: Intersectional Analysis
-# ---------------------------------------------------------------------------
 
 def compute_intersectional_analysis(test_df: pd.DataFrame) -> pd.DataFrame:
-    print("\nStep 2.3: Intersectional subgroup analysis...")
+    
+    """
+    do intersectional analysis, first take 2 groups combinations and then 3 groups combinations.
+    """
+
+    print("\nIntersectional subgroup analysis...")
     rows = []
     # Age x Gender
     for (ag, gn), sub in test_df.groupby(["age_group", "gender_clean"]):
@@ -265,11 +252,6 @@ def compute_intersectional_analysis(test_df: pd.DataFrame) -> pd.DataFrame:
             "n_total", "n_positive", "n_negative"]
     return result[[c for c in cols if c in result.columns]]
 
-
-# ---------------------------------------------------------------------------
-# Step 3: Visualizations
-# ---------------------------------------------------------------------------
-
 def plot_error_rates_bar(error_df: pd.DataFrame):
     """Bar charts of FNR and FPR by subgroup for each protected attribute."""
     for attr in error_df["attribute"].unique():
@@ -299,7 +281,6 @@ def plot_error_rates_bar(error_df: pd.DataFrame):
         fig.savefig(FIGURES_DIR / f"error_rates_{attr.lower().replace(' ', '_')}.png", dpi=150)
         plt.close(fig)
         print(f"  Saved error rate plot for {attr}")
-
 
 def plot_calibration_curves(test_df: pd.DataFrame):
     """Calibration curves overlaid by subgroup for each protected attribute."""
@@ -382,13 +363,11 @@ def plot_calibration_gap_heatmap(cal_df: pd.DataFrame):
     plt.close(fig)
     print("  Saved calibration gap plot")
 
-
-# ---------------------------------------------------------------------------
-# Step 3.2: Narrative Report
-# ---------------------------------------------------------------------------
-
 def generate_narrative(error_df, cal_df, inter_df, test_df):
-    print("\nStep 3.2: Generating narrative report...")
+    """
+    generate automatc report for the analysis
+    """
+    print("\nGenerating narrative report...")
     lines = []
     lines.append("=" * 80)
     lines.append("FAIRNESS ANALYSIS REPORT — reduced_logistic_elastic_net")
@@ -496,29 +475,29 @@ def generate_narrative(error_df, cal_df, inter_df, test_df):
 def main():
     _ensure_dirs()
 
-    # Step 1 & 3: Load data, model, generate predictions
-    test_df = prepare_data_and_predictions()
+    # Load data, model, generate predictions
+    test_df = prepare_data_and_predictions() # test df includes y pred col
 
-    # Step 2.1: Subgroup error rates
+    # Subgroup error rates
     error_df = compute_subgroup_error_rates(test_df)
     error_df.to_csv(REPORTS_DIR / "subgroup_error_rates.csv", index=False)
 
-    # Step 2.2: Calibration
+    # Calibration
     cal_df = compute_subgroup_calibration(test_df)
     cal_df.to_csv(REPORTS_DIR / "subgroup_calibration.csv", index=False)
 
-    # Step 2.3: Intersectional analysis
+    # Intersectional analysis
     inter_df = compute_intersectional_analysis(test_df)
     inter_df.to_csv(REPORTS_DIR / "intersectional_analysis.csv", index=False)
 
-    # Step 3.1: Visualizations
-    print("\nStep 3.1: Generating visualizations...")
+    # Visualizations
+    print("\nGenerating visualizations...")
     plot_error_rates_bar(error_df)
     plot_calibration_curves(test_df)
     plot_intersectional_summary(inter_df)
     plot_calibration_gap_heatmap(cal_df)
 
-    # Step 3.2: Narrative
+    # Narrative
     report = generate_narrative(error_df, cal_df, inter_df, test_df)
     print("\n" + report)
     print("\n✓ Fairness analysis complete. All outputs saved to:", OUTPUT_DIR)
