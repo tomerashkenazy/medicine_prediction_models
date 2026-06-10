@@ -250,8 +250,24 @@ def nested_grid_search_model(
     )
 
 
-def apache_benchmark(df: pd.DataFrame) -> pd.DataFrame:
-    benchmark = df[[TARGET_COLUMN, APACHE_BENCHMARK_COLUMN]].dropna()
+def apache_benchmark(
+    df: pd.DataFrame,
+    apache_source_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    if APACHE_BENCHMARK_COLUMN in df.columns:
+        benchmark = df[[TARGET_COLUMN, APACHE_BENCHMARK_COLUMN]].copy()
+    elif apache_source_df is not None:
+        _validate_columns(df, [ID_COLUMN, TARGET_COLUMN])
+        _validate_columns(apache_source_df, [ID_COLUMN, APACHE_BENCHMARK_COLUMN])
+        benchmark = df[[ID_COLUMN, TARGET_COLUMN]].merge(
+            apache_source_df[[ID_COLUMN, APACHE_BENCHMARK_COLUMN]],
+            on=ID_COLUMN,
+            how="left",
+        )
+    else:
+        return pd.DataFrame()
+
+    benchmark = benchmark[[TARGET_COLUMN, APACHE_BENCHMARK_COLUMN]].dropna()
     benchmark = benchmark[
         (benchmark[APACHE_BENCHMARK_COLUMN] >= 0)
         & (benchmark[APACHE_BENCHMARK_COLUMN] <= 1)
@@ -268,16 +284,27 @@ def train_from_configs(
     *,
     config_dir: Path = DEFAULT_CONFIG_DIR,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
+    training_data_path: Path | None = None,
+    unlabeled_data_path: Path | None = None,
+    solution_template_path: Path | None = None,
+    apache_benchmark_data_path: Path | None = None,
     n_splits: int = 5,
     inner_splits: int = 3,
     random_state: int = 42,
     search_n_jobs: int = -1,
     excluded_feature_columns: list[str] | None = None,
     include_models: list[str] | None = None,
+    save_final_artifacts: bool = True,
 ) -> None:
     output_dirs = ensure_output_dirs(output_dir)
-    train_df = apply_stage1_cohort(load_training_data())
-    unlabeled_df = load_unlabeled_data()
+    train_df = apply_stage1_cohort(load_training_data(training_data_path))
+    unlabeled_df = load_unlabeled_data(unlabeled_data_path)
+    solution_template = load_solution_template(solution_template_path)
+    apache_source_df = (
+        apply_stage1_cohort(load_training_data(apache_benchmark_data_path))
+        if apache_benchmark_data_path
+        else None
+    )
     config_entries = [
         (config_path, load_model_config(config_path))
         for config_path in sorted(config_dir.glob("*.yaml"))
@@ -310,7 +337,9 @@ def train_from_configs(
     X = train_df[feature_columns]
     y = train_df[TARGET_COLUMN].astype(int)
 
-    save_csv(apache_benchmark(train_df), output_dirs["reports"] / "apache_benchmark_metrics.csv")
+    apache_metrics = apache_benchmark(train_df, apache_source_df)
+    if not apache_metrics.empty:
+        save_csv(apache_metrics, output_dirs["reports"] / "apache_benchmark_metrics.csv")
     save_csv(
         pd.DataFrame({"feature_name": feature_columns}),
         output_dirs["reports"] / "model_input_features.csv",
@@ -363,18 +392,21 @@ def train_from_configs(
             best_params_by_fold.insert(0, "model", model_name)
             all_best_params_by_fold.append(best_params_by_fold)
 
-            final_search = _grid_search(
-                build_pipeline(config, X),
-                config["search_grid"],
-                inner_splits=inner_splits,
-                random_state=random_state,
-                search_n_jobs=search_n_jobs,
-            )
-            final_search.fit(X, y, **_fit_params(config.get("fit"), y))
-            final_pipeline = final_search.best_estimator_
-            final_params = {"model": model_name, "best_roc_auc": final_search.best_score_}
-            final_params.update(final_search.best_params_)
-            final_best_params.append(final_params)
+            if save_final_artifacts:
+                final_search = _grid_search(
+                    build_pipeline(config, X),
+                    config["search_grid"],
+                    inner_splits=inner_splits,
+                    random_state=random_state,
+                    search_n_jobs=search_n_jobs,
+                )
+                final_search.fit(X, y, **_fit_params(config.get("fit"), y))
+                final_pipeline = final_search.best_estimator_
+                final_params = {"model": model_name, "best_roc_auc": final_search.best_score_}
+                final_params.update(final_search.best_params_)
+                final_best_params.append(final_params)
+            else:
+                final_pipeline = None
         else:
             fold_metrics, threshold_metrics_df, oof_predictions = cross_validate_model(
                 pipeline,
@@ -384,8 +416,11 @@ def train_from_configs(
                 random_state=random_state,
                 fit_config=config.get("fit"),
             )
-            final_pipeline = build_pipeline(config, X)
-            final_pipeline.fit(X, y, **_fit_params(config.get("fit"), y))
+            if save_final_artifacts:
+                final_pipeline = build_pipeline(config, X)
+                final_pipeline.fit(X, y, **_fit_params(config.get("fit"), y))
+            else:
+                final_pipeline = None
 
         fold_metrics.insert(0, "model", model_name)
         threshold_metrics_df.insert(0, "model", model_name)
@@ -394,54 +429,59 @@ def train_from_configs(
         all_threshold_metrics.append(threshold_metrics_df)
 
         save_csv(oof_predictions, output_dirs["reports"] / f"{model_name}_oof_predictions.csv")
-        save_roc_curve(
-            oof_predictions["observed_hospital_death"],
-            oof_predictions["predicted_mortality_probability"],
-            output_dirs["figures"] / f"{model_name}_roc_curve.png",
-            f"{model_name} ROC curve",
-        )
-        save_precision_recall_curve(
-            oof_predictions["observed_hospital_death"],
-            oof_predictions["predicted_mortality_probability"],
-            output_dirs["figures"] / f"{model_name}_precision_recall_curve.png",
-            f"{model_name} precision-recall curve",
-        )
-
-        joblib.dump(final_pipeline, output_dirs["models"] / f"{model_name}.joblib")
-        feature_accounting_rows.append(
-            _model_feature_accounting(
-                model_name=model_name,
-                final_pipeline=final_pipeline,
-                raw_feature_count_before_exclusion=len(raw_feature_columns_before_exclusion),
-                raw_feature_count_after_exclusion=len(feature_columns),
-                excluded_feature_columns=excluded_feature_columns,
+        if save_final_artifacts:
+            save_roc_curve(
+                oof_predictions["observed_hospital_death"],
+                oof_predictions["predicted_mortality_probability"],
+                output_dirs["figures"] / f"{model_name}_roc_curve.png",
+                f"{model_name} ROC curve",
             )
-        )
-        coefficient_report = _coefficient_report(model_name, final_pipeline)
-        if not coefficient_report.empty:
-            coefficient_reports.append(coefficient_report)
+            save_precision_recall_curve(
+                oof_predictions["observed_hospital_death"],
+                oof_predictions["predicted_mortality_probability"],
+                output_dirs["figures"] / f"{model_name}_precision_recall_curve.png",
+                f"{model_name} precision-recall curve",
+            )
+
+        if save_final_artifacts and final_pipeline is not None:
+            joblib.dump(final_pipeline, output_dirs["models"] / f"{model_name}.joblib")
+            feature_accounting_rows.append(
+                _model_feature_accounting(
+                    model_name=model_name,
+                    final_pipeline=final_pipeline,
+                    raw_feature_count_before_exclusion=len(raw_feature_columns_before_exclusion),
+                    raw_feature_count_after_exclusion=len(feature_columns),
+                    excluded_feature_columns=excluded_feature_columns,
+                )
+            )
+            coefficient_report = _coefficient_report(model_name, final_pipeline)
+            if not coefficient_report.empty:
+                coefficient_reports.append(coefficient_report)
+                save_csv(
+                    coefficient_report,
+                    output_dirs["reports"] / f"{model_name}_coefficients.csv",
+                )
+
+            unlabeled_predictions = solution_template.copy()
+            probabilities = _predict_mortality_probability(
+                final_pipeline,
+                unlabeled_df[feature_columns],
+            )
+            prediction_by_id = pd.DataFrame(
+                {
+                    ID_COLUMN: unlabeled_df[ID_COLUMN].to_numpy(),
+                    TARGET_COLUMN: probabilities,
+                }
+            )
+            unlabeled_predictions = unlabeled_predictions[[ID_COLUMN]].merge(
+                prediction_by_id,
+                on=ID_COLUMN,
+                how="left",
+            )
             save_csv(
-                coefficient_report,
-                output_dirs["reports"] / f"{model_name}_coefficients.csv",
+                unlabeled_predictions,
+                output_dirs["predictions"] / f"{model_name}_unlabeled_predictions.csv",
             )
-
-        unlabeled_predictions = load_solution_template()
-        probabilities = _predict_mortality_probability(final_pipeline, unlabeled_df[feature_columns])
-        prediction_by_id = pd.DataFrame(
-            {
-                ID_COLUMN: unlabeled_df[ID_COLUMN].to_numpy(),
-                TARGET_COLUMN: probabilities,
-            }
-        )
-        unlabeled_predictions = unlabeled_predictions[[ID_COLUMN]].merge(
-            prediction_by_id,
-            on=ID_COLUMN,
-            how="left",
-        )
-        save_csv(
-            unlabeled_predictions,
-            output_dirs["predictions"] / f"{model_name}_unlabeled_predictions.csv",
-        )
         print(f"Finished {model_name}.", flush=True)
 
     if not all_fold_metrics:
@@ -465,10 +505,11 @@ def train_from_configs(
     save_csv(fold_metrics_df, output_dirs["reports"] / "cv_fold_metrics.csv")
     save_csv(summary, output_dirs["reports"] / "cv_summary_metrics.csv")
     save_csv(threshold_metrics_df, output_dirs["reports"] / "cv_threshold_metrics.csv")
-    save_csv(
-        pd.DataFrame(feature_accounting_rows),
-        output_dirs["reports"] / "feature_accounting.csv",
-    )
+    if feature_accounting_rows:
+        save_csv(
+            pd.DataFrame(feature_accounting_rows),
+            output_dirs["reports"] / "feature_accounting.csv",
+        )
     if all_best_params_by_fold:
         save_csv(
             pd.concat(all_best_params_by_fold, ignore_index=True),
@@ -490,16 +531,21 @@ def tune_from_configs(
     *,
     config_dir: Path = DEFAULT_CONFIG_DIR,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
+    training_data_path: Path | None = None,
+    unlabeled_data_path: Path | None = None,
+    solution_template_path: Path | None = None,
     n_splits: int = 5,
     inner_splits: int = 3,
     random_state: int = 42,
     search_n_jobs: int = -1,
     excluded_feature_columns: list[str] | None = None,
     include_models: list[str] | None = None,
+    save_final_artifacts: bool = True,
 ) -> None:
     output_dirs = ensure_output_dirs(output_dir)
-    train_df = apply_stage1_cohort(load_training_data())
-    unlabeled_df = load_unlabeled_data()
+    train_df = apply_stage1_cohort(load_training_data(training_data_path))
+    unlabeled_df = load_unlabeled_data(unlabeled_data_path)
+    solution_template = load_solution_template(solution_template_path)
     config_entries = [
         (config_path, load_model_config(config_path))
         for config_path in sorted(config_dir.glob("*.yaml"))
@@ -582,40 +628,41 @@ def tune_from_configs(
             f"{tuned_name} precision-recall curve",
         )
 
-        final_search = _grid_search(
-            build_pipeline(config, X),
-            config["search_grid"],
-            inner_splits=inner_splits,
-            random_state=random_state,
-            search_n_jobs=search_n_jobs,
-        )
-        final_search.fit(X, y, **_fit_params(config.get("fit"), y))
-        joblib.dump(final_search.best_estimator_, output_dirs["models"] / f"{tuned_name}.joblib")
+        if save_final_artifacts:
+            final_search = _grid_search(
+                build_pipeline(config, X),
+                config["search_grid"],
+                inner_splits=inner_splits,
+                random_state=random_state,
+                search_n_jobs=search_n_jobs,
+            )
+            final_search.fit(X, y, **_fit_params(config.get("fit"), y))
+            joblib.dump(final_search.best_estimator_, output_dirs["models"] / f"{tuned_name}.joblib")
 
-        final_params = {"model": tuned_name, "best_roc_auc": final_search.best_score_}
-        final_params.update(final_search.best_params_)
-        final_best_params.append(final_params)
+            final_params = {"model": tuned_name, "best_roc_auc": final_search.best_score_}
+            final_params.update(final_search.best_params_)
+            final_best_params.append(final_params)
 
-        unlabeled_predictions = load_solution_template()
-        probabilities = _predict_mortality_probability(
-            final_search.best_estimator_,
-            unlabeled_df[feature_columns],
-        )
-        prediction_by_id = pd.DataFrame(
-            {
-                ID_COLUMN: unlabeled_df[ID_COLUMN].to_numpy(),
-                TARGET_COLUMN: probabilities,
-            }
-        )
-        unlabeled_predictions = unlabeled_predictions[[ID_COLUMN]].merge(
-            prediction_by_id,
-            on=ID_COLUMN,
-            how="left",
-        )
-        save_csv(
-            unlabeled_predictions,
-            output_dirs["predictions"] / f"{tuned_name}_unlabeled_predictions.csv",
-        )
+            unlabeled_predictions = solution_template.copy()
+            probabilities = _predict_mortality_probability(
+                final_search.best_estimator_,
+                unlabeled_df[feature_columns],
+            )
+            prediction_by_id = pd.DataFrame(
+                {
+                    ID_COLUMN: unlabeled_df[ID_COLUMN].to_numpy(),
+                    TARGET_COLUMN: probabilities,
+                }
+            )
+            unlabeled_predictions = unlabeled_predictions[[ID_COLUMN]].merge(
+                prediction_by_id,
+                on=ID_COLUMN,
+                how="left",
+            )
+            save_csv(
+                unlabeled_predictions,
+                output_dirs["predictions"] / f"{tuned_name}_unlabeled_predictions.csv",
+            )
         print(f"Finished tuning {model_name}.", flush=True)
 
     if not all_fold_metrics:
@@ -646,21 +693,35 @@ def tune_from_configs(
         best_params_by_fold_df,
         output_dirs["reports"] / "tuned_best_params_by_fold.csv",
     )
-    save_csv(
-        pd.DataFrame(final_best_params),
-        output_dirs["reports"] / "tuned_final_best_params.csv",
-    )
+    if final_best_params:
+        save_csv(
+            pd.DataFrame(final_best_params),
+            output_dirs["reports"] / "tuned_final_best_params.csv",
+        )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--training-data-path", type=Path)
+    parser.add_argument("--unlabeled-data-path", type=Path)
+    parser.add_argument("--solution-template-path", type=Path)
+    parser.add_argument(
+        "--apache-benchmark-data-path",
+        type=Path,
+        help="Optional raw training data path used only for APACHE benchmark metrics.",
+    )
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--inner-splits", type=int, default=3)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--search-n-jobs", type=int, default=-1)
+    parser.add_argument(
+        "--oof-only",
+        action="store_true",
+        help="Only save cross-validated metrics and OOF predictions; skip final fits.",
+    )
     parser.add_argument(
         "--exclude-feature",
         action="append",
@@ -682,21 +743,30 @@ if __name__ == "__main__":
         tune_from_configs(
             config_dir=args.config_dir,
             output_dir=args.output_dir,
+            training_data_path=args.training_data_path,
+            unlabeled_data_path=args.unlabeled_data_path,
+            solution_template_path=args.solution_template_path,
             n_splits=args.n_splits,
             inner_splits=args.inner_splits,
             random_state=args.random_state,
             search_n_jobs=args.search_n_jobs,
             excluded_feature_columns=args.exclude_feature,
             include_models=args.include_model,
+            save_final_artifacts=not args.oof_only,
         )
     else:
         train_from_configs(
             config_dir=args.config_dir,
             output_dir=args.output_dir,
+            training_data_path=args.training_data_path,
+            unlabeled_data_path=args.unlabeled_data_path,
+            solution_template_path=args.solution_template_path,
+            apache_benchmark_data_path=args.apache_benchmark_data_path,
             n_splits=args.n_splits,
             inner_splits=args.inner_splits,
             random_state=args.random_state,
             search_n_jobs=args.search_n_jobs,
             excluded_feature_columns=args.exclude_feature,
             include_models=args.include_model,
+            save_final_artifacts=not args.oof_only,
         )

@@ -15,18 +15,17 @@ SOLUTION_TEMPLATE_PATH = DATA_DIR / "solution_template.csv"
 DICTIONARY_PATH = DATA_DIR / "WiDS Datathon 2020 Dictionary.csv"
 
 
-def load_training_data(path: Path = TRAINING_PATH) -> pd.DataFrame:
-    return pd.read_csv(path)
+def load_training_data(path: Path | None = TRAINING_PATH) -> pd.DataFrame:
+    return pd.read_csv(path or TRAINING_PATH)
 
 
-def load_unlabeled_data(path: Path = UNLABELED_PATH) -> pd.DataFrame:
-    return pd.read_csv(path)
+def load_unlabeled_data(path: Path | None = UNLABELED_PATH) -> pd.DataFrame:
+    return pd.read_csv(path or UNLABELED_PATH)
 
 
-def load_solution_template(path: Path = SOLUTION_TEMPLATE_PATH) -> pd.DataFrame:
-    return pd.read_csv(path)
+def load_solution_template(path: Path | None = SOLUTION_TEMPLATE_PATH) -> pd.DataFrame:
+    return pd.read_csv(path or SOLUTION_TEMPLATE_PATH)
 
 
-def load_dictionary(path: Path = DICTIONARY_PATH) -> pd.DataFrame:
-    return pd.read_csv(path)
-
+def load_dictionary(path: Path | None = DICTIONARY_PATH) -> pd.DataFrame:
+    return pd.read_csv(path or DICTIONARY_PATH)
